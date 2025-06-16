@@ -9,7 +9,7 @@ const PORT = 3000
 app.use(express.json())
 
 function checkIP(req, res, next) {
-    const allowedIPs = ['::1', '127.0.0.1', '192.168.1.100', '36.82.179.77']
+    const allowedIPs = ['::1', '127.0.0.1', '192.168.1.100', '36.82.179.77', '103.76.120.172']
     let ip = req.ip
 
     // Handle IPv6 mapped IPv4

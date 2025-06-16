@@ -9,10 +9,16 @@ const PORT = 3000
 app.use(express.json())
 
 function checkIP(req, res, next) {
-    const allowedIPs = ['::1', '192.168.1.100', '127.0.0.1:8000']
-    const ip = req.ip
+    const allowedIPs = ['::1', '127.0.0.1', '192.168.1.100', '36.82.179.77']
+    let ip = req.ip
+
+    // Handle IPv6 mapped IPv4
+    if (ip.startsWith('::ffff:')) {
+        ip = ip.replace('::ffff:', '')
+    }
+
     if (!allowedIPs.includes(ip)) {
-       return res.status(403).json({ message: 'Forbidden: IP not allowed. ypur ip: ' + ip })
+        return res.status(403).json({ message: 'Forbidden: IP not allowed. your ip: ' + ip })
     }
     next()
 }

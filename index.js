@@ -3,6 +3,7 @@ import baileys, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVer
 import { Boom } from '@hapi/boom'
 import fs from 'fs'
 import QRCode from 'qrcode'
+import { getLinkPreview } from 'link-preview-js'
 
 const app = express()
 const PORT = 3000
@@ -109,6 +110,70 @@ app.post('/v1/logout', checkIP, async (req, res) => {
     res.status(500).json({ error: 'Gagal logout' })
   }
 })
+
+app.post('/v1/send-embeded-link-preview', checkIP, async (req, res) => {
+  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+
+  const { number, message, link } = req.body
+  if (!number || !message || !link) {
+    return res.status(400).json({ error: 'Parameter number, message, dan link wajib diisi' })
+  }
+
+  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
+
+  try {
+    const preview = await getLinkPreview(link)
+    const previewText = `${message}\n\n${link}`
+
+    await sock.sendMessage(jid, {
+      text: previewText,
+      matchedText: link,
+      title: preview.title || "Hello World",
+      description: preview.description || "Hello World Descriptions",
+      previewType: 0,
+    })
+
+    res.json({ status: 'Pesan dengan custom link preview dikirim', to: number })
+  } catch (err) {
+    console.error('❌ Gagal generate preview:', err)
+    res.status(500).json({ error: 'Gagal mengambil data preview atau mengirim pesan' })
+  }
+})
+
+
+app.post('/v1/send-contact', checkIP, async (req, res) => {
+  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+
+  const { number, contactPhone, displayName } = req.body
+  if (!number || !contactPhone || !displayName) {
+    return res.status(400).json({ error: 'Parameter number, contactPhone dan displayName wajib diisi' })
+  }
+
+  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
+
+  try {
+
+    const vcard = 'BEGIN:VCARD\n'
+            + 'VERSION:3.0\n' 
+            + `FN:${displayName}\n`
+            + `ORG:${displayName};\n`
+            + `TEL;type=CELL;type=VOICE;waid=${contactPhone}:+${contactPhone}\n`
+            + 'END:VCARD'
+
+    await sock.sendMessage(jid, {
+      contacts: { 
+          displayName: `${displayName}`, 
+          contacts: [{ vcard }] 
+      }
+    })
+
+    res.json({ status: 'Contact dikirim ', to: number })
+  } catch (err) {
+    console.error('❌ Gagal generate preview:', err)
+    res.status(500).json({ error: 'Gagal mengambil data preview atau mengirim pesan' })
+  }
+})
+
 
 app.listen(PORT, () => {
   console.log(`🚀 Server berjalan di http://localhost:${PORT}`)

@@ -4,6 +4,7 @@ import { Boom } from '@hapi/boom'
 import fs from 'fs'
 import QRCode from 'qrcode'
 import { getLinkPreview } from 'link-preview-js'
+import axios from 'axios'
 
 const app = express()
 const PORT = 3000
@@ -171,6 +172,37 @@ app.post('/v1/send-contact', checkIP, async (req, res) => {
   } catch (err) {
     console.error('❌ Gagal generate preview:', err)
     res.status(500).json({ error: 'Gagal mengambil data preview atau mengirim pesan' })
+  }
+})
+
+app.post('/v1/group/send', checkIP, async (req, res) => {
+  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+
+  const { number, message, imagelink } = req.body
+  const jid = number
+
+  try {
+    if (imagelink) {
+      const response = await axios.get(imagelink, { responseType: 'arraybuffer', validateStatus: () => true })
+      
+      // Cek status HTTP
+      if (response.status !== 200) {
+        await sock.sendMessage(jid, { text: message + "\nGambar tidak ter load" })
+        return res.status(400).json({ error: `Gagal mengunduh gambar (${response.status})`, url: imagelink })
+      }
+  
+      const buffer = Buffer.from(response.data, 'binary')
+  
+      // Kirim pesan gambar
+      await sock.sendMessage(jid, { image: buffer, caption: message || '' })
+    } else {
+      await sock.sendMessage(jid, { text: message })
+    }
+  
+    res.json({ status: '✅ Pesan dikirim', to: number })
+  } catch (err) {
+    console.error('❌ Error:', err)
+    res.status(500).json({ error: 'Gagal mengirim pesan', details: err.message })
   }
 })
 

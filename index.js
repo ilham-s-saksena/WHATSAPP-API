@@ -2,6 +2,7 @@ import express from 'express'
 import baileys, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import fs from 'fs'
+import fsPromises from 'fs/promises'
 import QRCode from 'qrcode'
 import { getLinkPreview } from 'link-preview-js'
 import axios from 'axios'
@@ -11,105 +12,185 @@ const PORT = 3000
 app.use(express.json())
 
 function checkIP(req, res, next) {
-    const allowedIPs = ['::1', '127.0.0.1', '192.168.1.100', '36.82.179.77', '103.76.120.172']
+    
+    const allowedIPs = ['::1', '36.82.179.77', '103.76.120.172']
+    const allowedIPsDev = ['::1', '127.0.0.1', '36.82.179.77', '103.76.120.172']
     let ip = req.ip
 
-    // Handle IPv6 mapped IPv4
     if (ip.startsWith('::ffff:')) {
         ip = ip.replace('::ffff:', '')
     }
 
-    if (!allowedIPs.includes(ip)) {
+    if (!allowedIPsDev.includes(ip)) {
         return res.status(403).json({ message: 'Forbidden: IP not allowed. your ip: ' + ip })
     }
     next()
 }
 
 let sock = null
-let latestQR = null
-let authPath = 'auth_info'
+let latestQR = null                // string QR (raw)
+let isStarting = false             // lock agar tidak double start
+const authPath = 'auth_info'       // folder session
 
-// Jalankan koneksi WhatsApp
+// Helper: cek koneksi
+const isConnected = () => !!(sock && sock.user)
+
+// Helper: start socket (dengan lock)
 async function startSock() {
-  const { state, saveCreds } = await useMultiFileAuthState(authPath)
-  const { version } = await fetchLatestBaileysVersion()
+  if (isStarting) return
+  isStarting = true
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(authPath)
+    const { version } = await fetchLatestBaileysVersion()
 
-  sock = baileys.makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false
-  })
+    sock = baileys.makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false, // kita handle QR via endpoint
+      syncFullHistory: false,
+    })
 
-  sock.ev.on('creds.update', saveCreds)
+    // simpan kredensial setiap update
+    sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update
+    // event koneksi
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update
 
-    if (qr) {
-      latestQR = qr
-      console.log('✅ QR Code tersedia (juga bisa didapat dari /v1/login)')
-    }
+      if (qr) {
+        latestQR = qr
+        console.log('✅ QR tersedia. Ambil via GET /v1/login')
+      }
 
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-      console.log('⚠️ Koneksi ditutup. Reconnect?', shouldReconnect)
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut
+        const shouldReconnect = !isLoggedOut
+        console.log('⚠️  Koneksi ditutup. statusCode:', statusCode, 'reconnect?', shouldReconnect)
 
-      if (shouldReconnect) await startSock()
-    }
+        if (shouldReconnect) {
+          // tunggu sedikit untuk menghindari loop cepat
+          setTimeout(() => startSock().catch(console.error), 1000)
+        } else {
+          // benar-benar logout
+          latestQR = null
+          sock = null
+        }
+      }
 
-    if (connection === 'open') {
-      latestQR = null // reset QR saat sudah terkoneksi
-      console.log('✅ Tersambung ke WhatsApp')
-    }
-  })
+      if (connection === 'open') {
+        latestQR = null
+        console.log('✅ Tersambung ke WhatsApp sebagai', sock.user?.id)
+      }
+    })
 
-  sock.ev.on('messages.upsert', ({ messages, type }) => {
-    console.log('📩 Pesan masuk:', messages[0]?.message)
-  })
+    // event pesan (opsional)
+    sock.ev.on('messages.upsert', ({ messages }) => {
+      console.log('📩 Pesan masuk:', messages?.[0]?.key?.remoteJid, messages?.[0]?.message?.conversation || Object.keys(messages?.[0]?.message || {}))
+    })
+  } catch (err) {
+    console.error('❌ Gagal startSock:', err)
+    // jika gagal inisialisasi, kosongkan sock supaya bisa dicoba lagi
+    sock = null
+    throw err
+  } finally {
+    isStarting = false
+  }
 }
 
+// start saat boot
 await startSock()
 
-// ========================
-// API Routes
-// ========================
+// ====== ROUTES ======
 
+// GET QR / status login
 app.get('/v1/login', checkIP, async (req, res) => {
-  if (latestQR) {
-    // Kirim QR Code dalam bentuk data URI
-    const qrImage = await QRCode.toDataURL(latestQR)
-    return res.json({ qr: qrImage })
-  }
-
-  res.json({ message: 'Sudah terhubung atau QR belum tersedia' })
-})
-
-app.post('/v1/send', checkIP, async (req, res) => {
-  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
-
-  const { number, message } = req.body
-  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
-
   try {
-    await sock.sendMessage(jid, { text: message })
-    res.json({ status: 'Pesan dikirim', to: number })
+    // kalau belum ada socket atau belum connected, pastikan sudah dipanggil start
+    if (!sock && !isStarting) {
+      await startSock()
+    }
+
+    if (isConnected()) {
+      return res.json({
+        status: 'connected',
+        user: sock.user, // { id, name? }
+        message: 'Sudah terhubung ke WhatsApp',
+      })
+    }
+
+    if (latestQR) {
+      const dataUrl = await QRCode.toDataURL(latestQR, { errorCorrectionLevel: 'M' })
+      return res.json({
+        status: 'scan_qr',
+        qr: dataUrl, // data:image/png;base64,...
+        message: 'Silakan scan QR untuk login',
+      })
+    }
+
+    // belum ada QR, biasanya sebentar lagi muncul
+    return res.json({
+      status: 'pending',
+      message: 'QR belum tersedia. Coba lagi sebentar.',
+    })
   } catch (err) {
-    console.error('❌ Gagal kirim:', err)
-    res.status(500).json({ error: 'Gagal mengirim pesan' })
+    console.error('❌ /v1/login error:', err)
+    res.status(500).json({ error: 'Gagal menyiapkan login', details: err.message })
   }
 })
 
-app.post('/v1/logout', checkIP, async (req, res) => {
+// LOGOUT bersih
+app.get('/v1/logout', checkIP, async (req, res) => {
   try {
-    if (sock) await sock.logout()
-    fs.rmSync(authPath, { recursive: true, force: true })
+    // 1) logout dari sisi Baileys (akan invalidasi session)
+    if (sock) {
+      try {
+        await sock.logout()
+      } catch (e) {
+        // kalau sudah ter-logout, abaikan
+        console.warn('⚠️ sock.logout() warning:', e?.message || e)
+      }
+      try {
+        // tutup koneksi websocket
+        await sock.ws?.close()
+      } catch {}
+    }
+
+    // 2) hapus folder kredensial (aman karena sudah logout)
+    if (fs.existsSync(authPath)) {
+      await fsPromises.rm(authPath, { recursive: true, force: true })
+    }
+
+    // 3) reset state
     sock = null
     latestQR = null
-    res.json({ message: 'Berhasil logout dan hapus session' })
+
+    res.json({ status: 'ok', message: 'Berhasil logout & hapus session' })
   } catch (err) {
     console.error('❌ Gagal logout:', err)
-    res.status(500).json({ error: 'Gagal logout' })
+    res.status(500).json({ error: 'Gagal logout', details: err.message })
   }
+})
+
+// (Opsional) status ringkas
+app.get('/v1/status', checkIP, async (req, res) => {
+  const user = sock?.user || {}
+  const state = sock?.ws?.readyState === 1 ? 'open' : 'closed'
+
+  res.json({
+    connected: isConnected(),
+    hasQR: !!latestQR,
+    state,
+    user: {
+      id: user.id || null,
+      name: user.name || null,
+      phone: user.id ? user.id.split('@')[0] : null,
+      platform: user.platform || 'WhatsApp Web',
+    },
+    battery: sock?.user?.battery ?? sock?.ws?.battery ?? null,
+    isCharging: sock?.user?.plugged ?? false,
+    lastSync: new Date().toISOString(),
+  })
 })
 
 app.post('/v1/send-embeded-link-preview', checkIP, async (req, res) => {
@@ -206,6 +287,23 @@ app.post('/v1/group/send', checkIP, async (req, res) => {
   }
 })
 
+app.post('/v1/send-image', checkIP, async (req, res) => {
+  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+
+  const { number, message, imagelink } = req.body
+  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
+
+  const response = await axios.get(imagelink, { responseType: 'arraybuffer', validateStatus: () => true })
+  const buffer = Buffer.from(response.data, 'binary')
+
+  try {
+    await sock.sendMessage(jid, { image: buffer, caption: message || '' })
+    res.json({ status: 'Pesan dikirim', to: number })
+  } catch (err) {
+    console.error('❌ Gagal kirim:', err)
+    res.status(500).json({ error: 'Gagal mengirim pesan' })
+  }
+})
 
 app.listen(PORT, () => {
   console.log(`🚀 Server berjalan di http://localhost:${PORT}`)

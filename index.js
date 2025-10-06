@@ -8,7 +8,7 @@ import { getLinkPreview } from 'link-preview-js'
 import axios from 'axios'
 
 const app = express()
-const PORT = 3000
+const PORT = 3421
 app.use(express.json())
 
 function checkIP(req, res, next) {

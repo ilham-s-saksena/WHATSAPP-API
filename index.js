@@ -193,6 +193,22 @@ app.get('/v1/status', checkIP, async (req, res) => {
   })
 })
 
+app.post('/v1/send', checkIP, async (req, res) => {
+  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+
+  const { number, message } = req.body
+  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
+
+  try {
+    await sock.sendMessage(jid, { text: message })
+    res.json({ status: 'Pesan dikirim', to: number })
+  } catch (err) {
+    console.error('❌ Gagal kirim:', err)
+    res.status(500).json({ error: 'Gagal mengirim pesan' })
+  }
+})
+
+
 app.post('/v1/send-embeded-link-preview', checkIP, async (req, res) => {
   if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
 

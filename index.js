@@ -8,13 +8,13 @@ import { getLinkPreview } from 'link-preview-js'
 import axios from 'axios'
 
 const app = express()
-const PORT = 3421
+const PORT = 3000
 app.use(express.json())
 
 function checkIP(req, res, next) {
     
-    const allowedIPs = ['::1', '36.82.179.77', '103.76.120.172']
-    const allowedIPsDev = ['::1', '127.0.0.1', '36.82.179.77', '103.76.120.172']
+    const allowedIPs = ['::1', '36.82.179.77', '103.175.207.122']
+    const allowedIPsDev = ['::1', '127.0.0.1', '36.82.179.77', '103.175.207.122']
     let ip = req.ip
 
     if (ip.startsWith('::ffff:')) {

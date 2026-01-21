@@ -1,5 +1,5 @@
 import express from 'express'
-import baileys, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
+import { makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import fs from 'fs'
 import fsPromises from 'fs/promises'
@@ -43,7 +43,7 @@ async function startSock() {
     const { state, saveCreds } = await useMultiFileAuthState(authPath)
     const { version } = await fetchLatestBaileysVersion()
 
-    sock = baileys.makeWASocket({
+    sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false, // kita handle QR via endpoint
@@ -184,7 +184,6 @@ app.get('/v1/status', checkIP, async (req, res) => {
     user: {
       id: user.id || null,
       name: user.name || null,
-      phone: user.id ? user.id.split('@')[0] : null,
       platform: user.platform || 'WhatsApp Web',
     },
     battery: sock?.user?.battery ?? sock?.ws?.battery ?? null,
@@ -194,17 +193,48 @@ app.get('/v1/status', checkIP, async (req, res) => {
 })
 
 app.post('/v1/send', checkIP, async (req, res) => {
-  if (!sock) return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+  if (!sock) {
+    return res.status(500).json({ error: 'WhatsApp belum terhubung' })
+  }
 
   const { number, message } = req.body
-  const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`
+  if (!number || !message) {
+    return res.status(400).json({ error: 'number dan message wajib diisi' })
+  }
 
   try {
-    await sock.sendMessage(jid, { text: message })
-    res.json({ status: 'Pesan dikirim', to: number })
+    // 1️⃣ normalisasi nomor
+    const pn = number
+      .replace(/\D/g, '')
+      .replace(/^0/, '62')
+
+    const jidGuess = `${pn}@s.whatsapp.net`
+
+    // 2️⃣ resolve ke WhatsApp (LID-safe)
+    const [result] = await sock.onWhatsApp(jidGuess)
+
+    if (!result || !result.exists) {
+      return res.status(404).json({
+        error: 'Nomor tidak terdaftar di WhatsApp',
+      })
+    }
+
+    const targetJid = result.jid // ⬅️ bisa LID atau PN
+
+    // 3️⃣ kirim pesan
+    await sock.sendMessage(targetJid, { text: message })
+
+    res.json({
+      status: 'Pesan dikirim',
+      to: pn,
+      jid: targetJid,
+    })
   } catch (err) {
     console.error('❌ Gagal kirim:', err)
-    res.status(500).json({ error: 'Gagal mengirim pesan' })
+    res.status(500).json({
+      error: 'Gagal mengirim pesan',
+      details: err.message,
+    })
   }
 })
 
